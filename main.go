@@ -9,7 +9,10 @@ import (
 
 func main() {
 	/// input
-	mic, _ := gmf.NewInputCtxWithFormatName("default", "alsa")
+	mic, err := gmf.NewInputCtxWithFormatName("default", "alsa")
+	if err != nil {
+		log.Fatalf("Could not open input context: %s", err)
+	}
 	mic.Dump()
 
 	ast, err := mic.GetBestStream(gmf.AVMEDIA_TYPE_AUDIO)
@@ -24,15 +27,7 @@ func main() {
 		log.Fatal("failed to create audio fifo")
 	}
 
-	/// output
-	codecName := ""
-	switch cc.SampleFmt() {
-	case gmf.AV_SAMPLE_FMT_S16:
-		codecName = "pcm_s16le"
-	default:
-		log.Fatal("sample format not support")
-	}
-	codec, err := gmf.FindEncoder(codecName)
+	codec, err := gmf.FindEncoder("libmp3lame")
 	if err != nil {
 		log.Fatal("find encoder error:", err.Error())
 	}
@@ -43,16 +38,17 @@ func main() {
 	}
 	defer audioEncCtx.Free()
 
-	outputCtx, err := gmf.NewOutputCtx("test.wav")
+	outputCtx, err := gmf.NewOutputCtx("test.mp3")
 	if err != nil {
 		log.Fatal("new output fail", err.Error())
 		return
 	}
 	defer outputCtx.Free()
 
-	audioEncCtx.SetSampleFmt(cc.SampleFmt()).
+	audioEncCtx.SetSampleFmt(gmf.AV_SAMPLE_FMT_S16P).
 		SetSampleRate(cc.SampleRate()).
-		SetChannels(cc.Channels())
+		SetChannels(cc.Channels()).
+		SetBitRate(128e3)
 
 	if outputCtx.IsGlobalHeader() {
 		audioEncCtx.SetFlag(gmf.CODEC_FLAG_GLOBAL_HEADER)
@@ -70,6 +66,24 @@ func main() {
 	}
 	audioStream.DumpContexCodec(audioEncCtx)
 
+	/// resample
+	options := []*gmf.Option{
+		{Key: "in_channel_count", Val: cc.Channels()},
+		{Key: "out_channel_count", Val: cc.Channels()},
+		{Key: "in_sample_rate", Val: cc.SampleRate()},
+		{Key: "out_sample_rate", Val: cc.SampleRate()},
+		{Key: "in_sample_fmt", Val: cc.SampleFmt()},
+		{Key: "out_sample_fmt", Val: gmf.AV_SAMPLE_FMT_S16P},
+	}
+
+	swrCtx, err := gmf.NewSwrCtx(options, audioStream.CodecCtx().Channels(), audioStream.CodecCtx().SampleFmt())
+	if err != nil {
+		log.Fatal("new swr context error:", err.Error())
+	}
+	if swrCtx == nil {
+		log.Fatal("unable to create Swr Context")
+	}
+
 	outputCtx.SetStartTime(0)
 
 	if err := outputCtx.WriteHeader(); err != nil {
@@ -80,38 +94,51 @@ func main() {
 
 	count := 0
 	for packet := range mic.GetNewPackets() {
-		srcFrames, err := ast.CodecCtx().Decode(packet)
+		srcFrames, err := cc.Decode(packet)
 		packet.Free()
 		if err != nil {
 			log.Println("capture audio error:", err)
 			continue
 		}
 
+		exit := false
 		for _, srcFrame := range srcFrames {
 			wrote := fifo.Write(srcFrame)
 			count += wrote
 
 			for fifo.SamplesToRead() >= 1152 {
-				dstFrame := fifo.Read(1152)
+				winFrame := fifo.Read(1152)
+				dstFrame, err := swrCtx.Convert(winFrame)
+				if err != nil {
+					log.Println("convert audio error:", err)
+					exit = true
+					break
+				}
 				if dstFrame == nil {
 					continue
 				}
+				winFrame.Free()
 
 				writePacket, err := dstFrame.Encode(audioEncCtx)
-				if err == nil {
-					if err := outputCtx.WritePacket(writePacket); err != nil {
-						log.Println("write packet err", err.Error())
-					}
-
-					writePacket.Free()
-				} else {
+				if err != nil {
 					log.Fatal(err)
 				}
+				if writePacket == nil {
+					continue
+				}
+
+				if err := outputCtx.WritePacket(writePacket); err != nil {
+					log.Println("write packet err", err.Error())
+				}
+				writePacket.Free()
 				dstFrame.Free()
+				if count > int(cc.SampleRate())*10 {
+					break
+				}
 			}
-			if count > int(cc.SampleRate())*10 {
-				break
-			}
+		}
+		if exit {
+			break
 		}
 	}
 }
