@@ -1,24 +1,25 @@
 package main
 
 import (
+	"fmt"
 	"log"
 
-	. "github.com/3d0c/gmf"
+	"github.com/3d0c/gmf"
 )
 
 func main() {
 	/// input
-	mic, _ := NewInputCtxWithFormatName("default", "alsa")
+	mic, _ := gmf.NewInputCtxWithFormatName("default", "alsa")
 	mic.Dump()
 
-	ast, err := mic.GetBestStream(AVMEDIA_TYPE_AUDIO)
+	ast, err := mic.GetBestStream(gmf.AVMEDIA_TYPE_AUDIO)
 	if err != nil {
 		log.Fatal("failed to find audio stream")
 	}
 	cc := ast.CodecCtx()
 
 	/// fifo
-	fifo := NewAVAudioFifo(cc.SampleFmt(), cc.Channels(), 1024)
+	fifo := gmf.NewAVAudioFifo(cc.SampleFmt(), cc.Channels(), 1024)
 	if fifo == nil {
 		log.Fatal("failed to create audio fifo")
 	}
@@ -26,47 +27,56 @@ func main() {
 	/// output
 	codecName := ""
 	switch cc.SampleFmt() {
-	case AV_SAMPLE_FMT_S16:
+	case gmf.AV_SAMPLE_FMT_S16:
 		codecName = "pcm_s16le"
 	default:
 		log.Fatal("sample format not support")
 	}
-	codec, err := FindEncoder(codecName)
+	codec, err := gmf.FindEncoder(codecName)
 	if err != nil {
 		log.Fatal("find encoder error:", err.Error())
 	}
 
-	occ := NewCodecCtx(codec)
-	if occ == nil {
+	audioEncCtx := gmf.NewCodecCtx(codec)
+	if audioEncCtx == nil {
 		log.Fatal("new output codec context error:", err.Error())
 	}
-	defer Release(occ)
+	defer audioEncCtx.Free()
 
-	occ.SetSampleFmt(cc.SampleFmt()).
-		SetSampleRate(cc.SampleRate()).
-		SetChannels(cc.Channels())
-
-	if err := occ.Open(nil); err != nil {
-		log.Fatal("can't open output codec context", err.Error())
-		return
-	}
-	outputCtx, err := NewOutputCtx("test.wav")
+	outputCtx, err := gmf.NewOutputCtx("test.wav")
 	if err != nil {
 		log.Fatal("new output fail", err.Error())
 		return
 	}
+	defer outputCtx.Free()
 
-	ost := outputCtx.NewStream(codec)
-	if ost == nil {
-		log.Fatal("Unable to create stream for [%s]\n", codec.LongName())
+	audioEncCtx.SetSampleFmt(cc.SampleFmt()).
+		SetSampleRate(cc.SampleRate()).
+		SetChannels(cc.Channels())
+
+	if outputCtx.IsGlobalHeader() {
+		audioEncCtx.SetFlag(gmf.CODEC_FLAG_GLOBAL_HEADER)
 	}
-	defer Release(ost)
 
-	ost.SetCodecCtx(occ)
+	audioStream := outputCtx.NewStream(codec)
+	if audioStream == nil {
+		log.Fatal(fmt.Errorf("unable to create stream for audioEnc [%s]", codec.LongName()))
+	}
+	defer audioStream.Free()
+
+	if err := audioEncCtx.Open(nil); err != nil {
+		log.Fatal("can't open output codec context", err.Error())
+		return
+	}
+	audioStream.DumpContexCodec(audioEncCtx)
+
+	outputCtx.SetStartTime(0)
 
 	if err := outputCtx.WriteHeader(); err != nil {
 		log.Fatal(err.Error())
 	}
+
+	outputCtx.Dump()
 
 	count := 0
 	for packet := range mic.GetNewPackets() {
@@ -87,7 +97,7 @@ func main() {
 					continue
 				}
 
-				writePacket, err := dstFrame.Encode(occ)
+				writePacket, err := dstFrame.Encode(audioEncCtx)
 				if err == nil {
 					if err := outputCtx.WritePacket(writePacket); err != nil {
 						log.Println("write packet err", err.Error())
