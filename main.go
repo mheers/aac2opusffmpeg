@@ -9,7 +9,7 @@ import (
 
 func main() {
 	/// input
-	mic, err := gmf.NewInputCtxWithFormatName("default", "alsa")
+	mic, err := gmf.NewInputCtx("demofiles/test.aac")
 	if err != nil {
 		log.Fatalf("Could not open input context: %s", err)
 	}
@@ -27,7 +27,7 @@ func main() {
 		log.Fatal("failed to create audio fifo")
 	}
 
-	codec, err := gmf.FindEncoder("libmp3lame")
+	codec, err := gmf.FindEncoder("libvorbis")
 	if err != nil {
 		log.Fatal("find encoder error:", err.Error())
 	}
@@ -38,17 +38,27 @@ func main() {
 	}
 	defer audioEncCtx.Free()
 
-	outputCtx, err := gmf.NewOutputCtx("test.mp3")
+	outputCtx, err := gmf.NewOutputCtx("test.ogg")
 	if err != nil {
 		log.Fatal("new output fail", err.Error())
 		return
 	}
 	defer outputCtx.Free()
 
-	audioEncCtx.SetSampleFmt(gmf.AV_SAMPLE_FMT_S16P).
+	// AV_SAMPLE_FMT_DBL: encoder doesn't support sample format dbl
+	// AV_SAMPLE_FMT_DBLP: encoder doesn't support sample format dblp
+	// AV_SAMPLE_FMT_FLT: encoder doesn't support sample format flt
+	// AV_SAMPLE_FMT_FLTP: more samples than frame size
+	// AV_SAMPLE_FMT_S16: encoder doesn't support sample format s16
+	// AV_SAMPLE_FMT_S16P: encoder doesn't support sample format s16p
+	// AV_SAMPLE_FMT_S32: encoder doesn't support sample format s32
+	// AV_SAMPLE_FMT_S32P: encoder doesn't support sample format s32p
+	// AV_SAMPLE_FMT_U8: encoder doesn't support sample format u8
+	outSampleFormat := gmf.AV_SAMPLE_FMT_FLTP
+
+	audioEncCtx.SetSampleFmt(outSampleFormat).
 		SetSampleRate(cc.SampleRate()).
-		SetChannels(cc.Channels()).
-		SetBitRate(128e3)
+		SetChannels(cc.Channels())
 
 	if outputCtx.IsGlobalHeader() {
 		audioEncCtx.SetFlag(gmf.CODEC_FLAG_GLOBAL_HEADER)
@@ -73,7 +83,7 @@ func main() {
 		{Key: "in_sample_rate", Val: cc.SampleRate()},
 		{Key: "out_sample_rate", Val: cc.SampleRate()},
 		{Key: "in_sample_fmt", Val: cc.SampleFmt()},
-		{Key: "out_sample_fmt", Val: gmf.AV_SAMPLE_FMT_S16P},
+		{Key: "out_sample_fmt", Val: outSampleFormat},
 	}
 
 	swrCtx, err := gmf.NewSwrCtx(options, audioStream.CodecCtx().Channels(), audioStream.CodecCtx().SampleFmt())
@@ -106,8 +116,8 @@ func main() {
 			wrote := fifo.Write(srcFrame)
 			count += wrote
 
-			for fifo.SamplesToRead() >= 1152 {
-				winFrame := fifo.Read(1152)
+			for fifo.SamplesToRead() >= 64 { // for ogg 64 is the maximum
+				winFrame := fifo.Read(64)
 				dstFrame, err := swrCtx.Convert(winFrame)
 				if err != nil {
 					log.Println("convert audio error:", err)
@@ -126,6 +136,7 @@ func main() {
 				if writePacket == nil {
 					continue
 				}
+				writePacket.SetStreamIndex(audioStream.Index())
 
 				if err := outputCtx.WritePacket(writePacket); err != nil {
 					log.Println("write packet err", err.Error())
